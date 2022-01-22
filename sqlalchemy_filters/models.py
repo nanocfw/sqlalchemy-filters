@@ -1,6 +1,7 @@
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.inspection import inspect
 from sqlalchemy.orm.mapper import Mapper
+from sqlalchemy.orm.util import AliasedClass, AliasedInsp
 from sqlalchemy.util import symbol
 import types
 
@@ -30,7 +31,7 @@ class Field(object):
         return sqlalchemy_field
 
     def _get_valid_field_names(self):
-        inspect_mapper = inspect(self.model)
+        inspect_mapper = inspect(self.model._aliased_insp.mapper if isinstance(self.model, AliasedClass) else self.model)
         columns = inspect_mapper.columns
         orm_descriptors = inspect_mapper.all_orm_descriptors
 
@@ -65,7 +66,7 @@ def get_query_models(query):
         models.extend(mapper.class_ for mapper in query._join_entities)
     else:  # sqlalchemy>=1.4
         models.extend(
-            mapper.class_ for mapper in query._compile_state()._join_entities
+            mapper.entity if isinstance(mapper, AliasedInsp) else mapper.class_ for mapper in query._compile_state()._join_entities
         )
 
     # account also query.select_from entities
@@ -81,7 +82,7 @@ def get_query_models(query):
         if model_class not in models:
             models.append(model_class)
 
-    return {model.__name__: model for model in models}
+    return {model._aliased_insp.name if isinstance(model, AliasedClass) else model.__name__: model for model in models}
 
 
 def get_model_from_spec(spec, query, default_model=None):
@@ -156,16 +157,20 @@ def auto_join(query, *model_names):
     and the join can be done implicitly.
     """
     # every model has access to the registry, so we can use any from the query
-    query_models = get_query_models(query).values()
-    model = list(query_models)[-1]
+    query_models = get_query_models(query)
+    model = list(query_models.values())[-1]
     if hasattr(model, "_decl_class_registry"):  # sqlalchemy<1.4
         model_registry = model._decl_class_registry
     else:  # sqlalchemy>=1.4
         model_registry = model.registry._class_registry
 
     for name in model_names:
+        model = query_models.get(name)
+        if model:
+            continue
+
         model = get_model_class_by_name(model_registry, name)
-        if model not in get_query_models(query).values():
+        if model not in query_models.values():
             try:
                 query = query.join(model)
             except InvalidRequestError:
